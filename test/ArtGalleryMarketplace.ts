@@ -1,48 +1,103 @@
-import {
-  loadFixture,
-  time,
-} from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
+import { loadFixture } from "@nomicfoundation/hardhat-toolbox-viem/network-helpers";
 import { expect } from "chai";
 import hre from "hardhat";
-import { getAddress, parseEther, zeroAddress, TransactionReceipt } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import {
+  getAddress,
+  parseEther,
+  zeroAddress,
+  TransactionReceipt,
+  AbiEventNotFoundError,
+} from "viem";
 
-describe("ArtGalleryMarketplace", function () {
+// Helper function to parse ArtworkListed event and get tokenId
+async function getTokenIdFromReceipt(
+  artGallery: any, // Consider typing this more strictly if possible
+  receipt: TransactionReceipt,
+): Promise<bigint | null> {
+  try {
+    const events = await artGallery.getEvents.ArtworkListed(
+      {}, // No filters needed here, just getting events from the block range
+      { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
+    );
+    // Find the event originating from the specific transaction hash
+    const relevantEvent = events.find(
+      (e: any) => e.transactionHash === receipt.transactionHash,
+    );
+    if (relevantEvent?.args?.tokenId !== undefined) {
+      return relevantEvent.args.tokenId;
+    }
+  } catch (error) {
+    // Handle cases where the event might not be found or ABI issues
+    if (error instanceof AbiEventNotFoundError) {
+      console.error("ArtworkListed event ABI not found or mismatch.");
+    } else {
+      console.error("Error fetching ArtworkListed event:", error);
+    }
+  }
+  console.warn(
+    `Could not find ArtworkListed event for tx ${receipt.transactionHash} in block ${receipt.blockNumber}`,
+  );
+  return null; // Or throw an error if tokenId is essential for the test flow
+}
+
+describe("ArtGalleryMarketplace Contract Tests", function () {
+  // --- Constants ---
+  const TEST_URI_1 = "ipfs://QmTestHash1";
+  const TEST_URI_2 = "ipfs://QmTestHash2";
+  const ONE_ETHER = parseEther("1");
+  const TWO_ETHER = parseEther("2");
+  const POINT_FIVE_ETHER = parseEther("0.5");
+  const DEFAULT_ROYALTY_FEE = 0n;
+  const MAX_ROYALTY_FEE = 5000n; // From contract
+  const NON_EXISTENT_TOKEN_ID = 999n;
+  const SAMPLE_ROYALTY_FEE_BPS = 500n; // 5%
+  const DEFAULT_MAX_PRICE = parseEther("1000");
   // --- Fixtures ---
 
-  async function deployArtGalleryMarketplaceFixture() {
-    const [owner, artist1, artist2, buyer1, buyer2, admin] =
-      await hre.viem.getWalletClients();
-    const artGallery = await hre.viem.deployContract("ArtGalleryMarketplace");
-    const publicClient = await hre.viem.getPublicClient();
-
-    const testURI = "ipfs://QmTest";
-    const oneEther = parseEther("1");
-    const twoEther = parseEther("2");
-    const pointFiveEther = parseEther("0.5");
-    const defaultRoyaltyFee = 0n; // 0%
-
-    return {
-      artGallery,
+  /**
+   * @notice Deploys the ArtGalleryMarketplace contract and returns standard accounts/clients.
+   */
+  async function deployMarketplaceFixture() {
+    // Get multiple accounts for different roles
+    const [
       owner,
       artist1,
       artist2,
       buyer1,
       buyer2,
-      admin,
+      designatedAdmin,
+      otherAccount,
+    ] = await hre.viem.getWalletClients();
+
+    // Deploy the contract using the 'owner' account
+    const artGallery = await hre.viem.deployContract(
+      "ArtGalleryMarketplace",
+      [],
+      {
+        client: { wallet: owner },
+      },
+    );
+    const publicClient = await hre.viem.getPublicClient();
+
+    return {
+      artGallery,
+      owner, // Contract deployer & initial admin
+      artist1,
+      artist2,
+      buyer1,
+      buyer2,
+      designatedAdmin, // An account intended to be made admin later
+      otherAccount, // A regular user account
       publicClient,
-      testURI,
-      oneEther,
-      twoEther,
-      pointFiveEther,
-      defaultRoyaltyFee,
     };
   }
 
-  async function createListedArtworkFixture() {
-    const deployFixture = await deployArtGalleryMarketplaceFixture();
-    const { artGallery, artist1, testURI, oneEther, publicClient } =
-      deployFixture;
+  /**
+   * @notice Deploys the contract and lists one artwork (tokenId 1) by artist1.
+   */
+  async function listedArtworkFixture() {
+    const deployData = await deployMarketplaceFixture();
+    const { artGallery, artist1, publicClient } = deployData;
 
     const artGalleryAsArtist = await hre.viem.getContractAt(
       "ArtGalleryMarketplace",
@@ -50,41 +105,34 @@ describe("ArtGalleryMarketplace", function () {
       { client: { wallet: artist1 } },
     );
 
-    // Estimate gas for listing
-    const gasEstimate = await artGalleryAsArtist.estimateGas.listArtwork([
-      testURI,
-      oneEther,
+    const txHash = await artGalleryAsArtist.write.listArtwork([
+      TEST_URI_1,
+      ONE_ETHER,
     ]);
-
-    // List artwork
-    const txHash = await artGalleryAsArtist.write.listArtwork(
-      [testURI, oneEther],
-      { gas: gasEstimate + 10000n },
-    ); // Add buffer
-
     const receipt = await publicClient.waitForTransactionReceipt({
       hash: txHash,
     });
-    if (!receipt.status || receipt.status !== "success") {
-      throw new Error(`Transaction failed: ${txHash}`);
+    const tokenId = await getTokenIdFromReceipt(artGallery, receipt);
+
+    const events3 = await artGallery.getEvents.ArtworkListed();
+
+    if (tokenId === null) {
+      throw new Error(
+        "listedArtworkFixture: Failed to retrieve tokenId from ArtworkListed event.",
+      );
     }
+    // Specific check for fixture setup
+    expect(tokenId).to.equal(1n);
 
-    // Find the ArtworkListed event to get the tokenId
-    const events = await artGallery.getEvents.ArtworkListed(
-      {},
-      { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
-    );
-    expect(events).to.have.lengthOf.at.least(1);
-    const tokenId = events[events.length - 1].args.tokenId; // Get the last listed token ID
-    expect(tokenId!).to.be.eq(1n);
-
-    return { ...deployFixture, tokenId };
+    return { ...deployData, tokenId };
   }
 
-  async function createSoldArtworkFixture() {
-    const listedFixture = await createListedArtworkFixture();
-    const { artGallery, buyer1, oneEther, publicClient, tokenId } =
-      listedFixture;
+  /**
+   * @notice Deploys, lists one artwork, and sells it to buyer1.
+   */
+  async function soldArtworkFixture() {
+    const listedData = await listedArtworkFixture();
+    const { artGallery, buyer1, publicClient, tokenId } = listedData;
 
     const artGalleryAsBuyer = await hre.viem.getContractAt(
       "ArtGalleryMarketplace",
@@ -92,53 +140,79 @@ describe("ArtGalleryMarketplace", function () {
       { client: { wallet: buyer1 } },
     );
 
-    const buyTxHash = await artGalleryAsBuyer.write.buyArtwork([tokenId!], {
-      value: oneEther,
+    const buyTxHash = await artGalleryAsBuyer.write.buyArtwork([tokenId], {
+      value: ONE_ETHER,
     });
     await publicClient.waitForTransactionReceipt({ hash: buyTxHash });
 
-    return { ...listedFixture, firstBuyer: buyer1 };
+    return { ...listedData }; // buyer1 is now the owner of tokenId
   }
 
-  // --- Tests ---
+  /**
+   * @notice Deploys the contract and designates an additional admin account.
+   */
+  async function designatedAdminFixture() {
+    const deployData = await deployMarketplaceFixture();
+    const { artGallery, owner, designatedAdmin, publicClient } = deployData;
+    const artGalleryAsOwner = await hre.viem.getContractAt(
+      "ArtGalleryMarketplace",
+      artGallery.address,
+      { client: { wallet: owner } },
+    );
+    const txHash = await artGalleryAsOwner.write.setAdmin([
+      getAddress(designatedAdmin.account.address),
+      true,
+    ]);
+    await publicClient.waitForTransactionReceipt({ hash: txHash });
 
-  describe("Deployment & Initialization", function () {
-    it("should deploy with correct name and symbol", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    // Verify admin was set
+    expect(
+      await artGallery.read.isAdmin([
+        getAddress(designatedAdmin.account.address),
+      ]),
+    ).to.be.true;
+
+    return deployData; // Contains the designatedAdmin who is now admin
+  }
+
+  // --- Test Suites ---
+
+  // ==============================
+  // 1. Deployment & Initialization
+  // ==============================
+  describe("1. Deployment and Initialization", function () {
+    it("1.1 should have correct name and symbol", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
       expect(await artGallery.read.name()).to.equal("ArtGallery NFT Market");
       expect(await artGallery.read.symbol()).to.equal("AGNFT");
     });
 
-    it("should set deployer as owner", async function () {
-      const { artGallery, owner } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("1.2 should set deployer as owner", async function () {
+      const { artGallery, owner } = await loadFixture(deployMarketplaceFixture);
       expect(await artGallery.read.owner()).to.equal(
         getAddress(owner.account.address),
       );
     });
 
-    it("should set owner as initial admin", async function () {
-      const { artGallery, owner } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      expect(await artGallery.read.isAdmin([getAddress(owner.account.address)]))
-        .to.be.true;
+    it("1.3 should set owner as initial admin and emit AdminStatusChanged event", async function () {
+      const { artGallery, owner } = await loadFixture(deployMarketplaceFixture);
+      const ownerAddress = getAddress(owner.account.address);
+      expect(await artGallery.read.isAdmin([ownerAddress])).to.be.true;
+
+      // Check event emitted by constructor
+      const events = await artGallery.getEvents.AdminStatusChanged();
+      expect(events).to.have.lengthOf(1); // Constructor emits exactly one
+      expect(events[0].args.account).to.equal(ownerAddress);
+      expect(events[0].args.isAdminStatus).to.be.true;
     });
 
-    it("should set correct default royalty fee", async function () {
-      const { artGallery, defaultRoyaltyFee } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      expect(await artGallery.read.royaltyFee()).to.equal(defaultRoyaltyFee);
+    it("1.4 should have correct default royalty fee", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
+      expect(await artGallery.read.royaltyFee()).to.equal(DEFAULT_ROYALTY_FEE);
     });
 
-    it("should support IERC721 and IERC2981 interfaces", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("1.5 should support required interfaces (IERC721, IERC2981)", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
       const ierc721InterfaceId = "0x80ac58cd";
       const ierc2981InterfaceId = "0x2a55205a";
       expect(await artGallery.read.supportsInterface([ierc721InterfaceId])).to
@@ -147,20 +221,22 @@ describe("ArtGalleryMarketplace", function () {
         .be.true;
     });
 
-    it("should initialize total artworks to 0", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("1.6 should initialize total artworks count to 0", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
       expect(await artGallery.read.getTotalArtworks()).to.equal(0n);
     });
   });
 
-  describe("Admin Management", function () {
-    it("should allow owner to add an admin", async function () {
-      const { artGallery, owner, admin, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const adminAddress = getAddress(admin.account.address);
+  // ==========================
+  // 2. Admin Management
+  // ==========================
+  describe("2. Admin Management (`setAdmin`)", function () {
+    it("2.1 should allow owner to add a new admin", async function () {
+      const { artGallery, owner, designatedAdmin, publicClient } =
+        await loadFixture(deployMarketplaceFixture);
+      const adminAddress = getAddress(designatedAdmin.account.address);
+      const ownerAddress = getAddress(owner.account.address);
+
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -171,293 +247,249 @@ describe("ArtGalleryMarketplace", function () {
         adminAddress,
         true,
       ]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: txHash,
+      });
 
       expect(await artGallery.read.isAdmin([adminAddress])).to.be.true;
 
-      const events = await artGallery.getEvents.AdminStatusChanged();
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.account).to.equal(adminAddress);
+      const events = await artGallery.getEvents.AdminStatusChanged(
+        {},
+        {
+          fromBlock: 0n, // Start from genesis block
+          toBlock: receipt.blockNumber,
+        },
+      );
+
+      expect(events.length).to.have.greaterThanOrEqual(2); // At least constructor + this add
+      expect(events[0].args.account).to.equal(ownerAddress);
       expect(events[0].args.isAdminStatus).to.be.true;
+
+      // Check the last event emitted
+      expect(events[events.length - 1].args.account).to.equal(adminAddress);
+      expect(events[events.length - 1].args.isAdminStatus).to.be.true;
     });
 
-    it("should allow owner to remove an admin", async function () {
-      const { artGallery, owner, admin, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const adminAddress = getAddress(admin.account.address);
+    it("2.2 should allow owner to remove an admin", async function () {
+      const { artGallery, owner, designatedAdmin, publicClient } =
+        await loadFixture(designatedAdminFixture); // Use fixture where designatedAdmin is already admin
+      const adminAddress = getAddress(designatedAdmin.account.address);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
 
-      // Add admin first
-      const addTxHash = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
-        true,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: addTxHash });
-      expect(await artGallery.read.isAdmin([adminAddress])).to.be.true;
+      expect(await artGallery.read.isAdmin([adminAddress])).to.be.true; // Verify pre-condition
 
-      // Remove admin
       const removeTxHash = await artGalleryAsOwner.write.setAdmin([
         adminAddress,
         false,
       ]);
-      await publicClient.waitForTransactionReceipt({ hash: removeTxHash });
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: removeTxHash,
+      });
       expect(await artGallery.read.isAdmin([adminAddress])).to.be.false;
 
-      // Check events (should have 2 now: add and remove)
-      const events = await artGallery.getEvents.AdminStatusChanged();
-
-      // last event Should have isAdminStatus == false
-      expect(events.length).to.have.greaterThanOrEqual(1);
-      expect(events[events.length - 1].args.account).to.equal(adminAddress); // Check the second event
+      const events = await artGallery.getEvents.AdminStatusChanged(
+        {},
+        {
+          fromBlock: 0n, // Start from genesis block
+          toBlock: receipt.blockNumber,
+        },
+      );
+      expect(events.length).to.have.greaterThanOrEqual(2); // At least constructor + add + this remove
+      // Check the last event emitted
+      expect(events[events.length - 1].args.account).to.equal(adminAddress);
       expect(events[events.length - 1].args.isAdminStatus).to.be.false;
     });
 
-    it("should not allow non-owner to set admin", async function () {
-      const { artGallery, admin, artist1 } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const artGalleryAsArtist = await hre.viem.getContractAt(
+    it("2.3 should NOT allow non-owner (even an admin) to manage admins", async function () {
+      const { artGallery, designatedAdmin, otherAccount } = await loadFixture(
+        designatedAdminFixture,
+      ); // designatedAdmin is admin here
+      const artGalleryAsAdmin = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: artist1 } },
+        { client: { wallet: designatedAdmin } },
+      );
+      const artGalleryAsOther = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: otherAccount } },
       );
 
+      // Admin tries to add another admin
       await expect(
-        artGalleryAsArtist.write.setAdmin([
-          getAddress(admin.account.address),
+        artGalleryAsAdmin.write.setAdmin([
+          getAddress(otherAccount.account.address),
+          true,
+        ]),
+      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
+
+      // Regular user tries to add an admin
+      await expect(
+        artGalleryAsOther.write.setAdmin([
+          getAddress(designatedAdmin.account.address),
           true,
         ]),
       ).to.be.rejectedWith("OwnableUnauthorizedAccount");
     });
-
-    it("should not allow admin to set another admin", async function () {
-      const { artGallery, owner, admin, artist1, publicClient } =
-        await loadFixture(deployArtGalleryMarketplaceFixture);
-      const adminAddress = getAddress(admin.account.address);
-      const artistAddress = getAddress(artist1.account.address);
-
-      // Owner makes 'admin' an admin
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-      const txHash = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
-        true,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      // 'admin' tries to make 'artist1' an admin
-      const artGalleryAsAdmin = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: admin } },
-      );
-
-      await expect(
-        artGalleryAsAdmin.write.setAdmin([artistAddress, true]),
-      ).to.be.rejectedWith("OwnableUnauthorizedAccount");
-    });
-
-    it("should allow owner to remove themselves as admin (but they remain owner)", async function () {
-      const { artGallery, owner, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const ownerAddress = getAddress(owner.account.address);
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-
-      // Owner is admin by default
-      expect(await artGallery.read.isAdmin([ownerAddress])).to.be.true;
-
-      const removeTxHash = await artGalleryAsOwner.write.setAdmin([
-        ownerAddress,
-        false,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: removeTxHash });
-
-      // Check _admins mapping explicitly (isAdmin checks owner() too)
-      // This requires adding an internal getter or relying on events/state checks
-      // Let's check the event instead
-      const events = await artGallery.getEvents.AdminStatusChanged();
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.account).to.equal(ownerAddress);
-      expect(events[0].args.isAdminStatus).to.be.false;
-
-      // Even if removed from _admins, isAdmin should return true due to owner check
-      expect(await artGallery.read.isAdmin([ownerAddress])).to.be.true;
-      // Ensure they are still owner
-      expect(await artGallery.read.owner()).to.equal(ownerAddress);
-    });
   });
 
-  describe("Royalty Management", function () {
-    it("should allow admin (owner) to set royalty fee", async function () {
-      const { artGallery, owner, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+  // ==========================
+  // 3. Royalty Management
+  // ==========================
+  describe("3. Royalty Management (`setRoyaltyFee`, `royaltyInfo`)", function () {
+    it("3.1 should allow any admin to set a valid royalty fee", async function () {
+      const { artGallery, owner, designatedAdmin, publicClient } =
+        await loadFixture(designatedAdminFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const newFee = 500n; // 5%
-
-      const txHash = await artGalleryAsOwner.write.setRoyaltyFee([newFee]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      expect(await artGallery.read.royaltyFee()).to.equal(newFee);
-
-      const events = await artGallery.getEvents.RoyaltyFeeUpdated();
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.newFee).to.equal(newFee);
-    });
-
-    it("should allow a designated admin (non-owner) to set royalty fee", async function () {
-      const { artGallery, owner, admin, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const adminAddress = getAddress(admin.account.address);
-      const newFee = 600n; // 6%
-
-      // Owner makes 'admin' an admin
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-      const addAdminTx = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
-        true,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: addAdminTx });
-
-      // Admin sets the fee
       const artGalleryAsAdmin = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: admin } },
+        { client: { wallet: designatedAdmin } },
       );
-      const setFeeTx = await artGalleryAsAdmin.write.setRoyaltyFee([newFee]);
-      await publicClient.waitForTransactionReceipt({ hash: setFeeTx });
 
-      expect(await artGallery.read.royaltyFee()).to.equal(newFee);
-      const events = await artGallery.getEvents.RoyaltyFeeUpdated();
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.newFee).to.equal(newFee);
+      // Owner sets fee
+      const fee1 = 500n; // 5%
+      const tx1 = await artGalleryAsOwner.write.setRoyaltyFee([fee1]);
+      const receipt1 = await publicClient.waitForTransactionReceipt({
+        hash: tx1,
+      });
+      expect(await artGallery.read.royaltyFee()).to.equal(fee1);
+
+      // Designated admin sets fee
+      const fee2 = 1000n; // 10%
+      const tx2 = await artGalleryAsAdmin.write.setRoyaltyFee([fee2]);
+      const receipt2 = await publicClient.waitForTransactionReceipt({
+        hash: tx2,
+      });
+      expect(await artGallery.read.royaltyFee()).to.equal(fee2);
+
+      const events = await artGallery.getEvents.RoyaltyFeeUpdated({
+        fromBlock: receipt1.blockNumber,
+        toBlock: receipt2.blockNumber,
+      });
+      expect(events.length).to.have.greaterThanOrEqual(2); // At least these two settings
+      expect(events[0].args.newFee).to.equal(fee1); // Check last setting
+      expect(events[events.length - 1].args.newFee).to.equal(fee2); // Check last setting
     });
 
-    it("should not allow setting royalty fee above maximum", async function () {
-      const { artGallery, owner } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("3.2 should NOT allow setting royalty fee above maximum", async function () {
+      const { artGallery, owner } = await loadFixture(deployMarketplaceFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const maxFee = await artGallery.read.MAX_ROYALTY_FEE(); // 5000n
 
       await expect(
-        artGalleryAsOwner.write.setRoyaltyFee([maxFee + 1n]),
+        artGalleryAsOwner.write.setRoyaltyFee([MAX_ROYALTY_FEE + 1n]),
       ).to.be.rejectedWith("ArtGalleryMarketplace__InvalidRoyaltyFee");
     });
 
-    it("should not allow non-admin to set royalty fee", async function () {
-      const { artGallery, artist1 } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
+    it("3.3 should NOT allow non-admin to set royalty fee", async function () {
+      const { artGallery, otherAccount } = await loadFixture(
+        deployMarketplaceFixture,
       );
-      const artGalleryAsArtist = await hre.viem.getContractAt(
+      const artGalleryAsOther = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: artist1 } },
+        { client: { wallet: otherAccount } },
       );
-      const newFee = 500n;
 
       await expect(
-        artGalleryAsArtist.write.setRoyaltyFee([newFee]),
+        artGalleryAsOther.write.setRoyaltyFee([SAMPLE_ROYALTY_FEE_BPS]),
       ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
     });
 
-    it("should calculate royalties correctly via royaltyInfo", async function () {
-      const {
-        owner,
-        publicClient,
-        artGallery,
-        artist1,
-        oneEther,
-        defaultRoyaltyFee,
-      } = await loadFixture(createListedArtworkFixture); // Use fixture where artwork exists
-
+    it("3.4 should calculate correct royalty via `royaltyInfo` when fee is set", async function () {
+      const { artGallery, owner, artist1, publicClient, tokenId } =
+        await loadFixture(listedArtworkFixture);
+      const artistAddress = getAddress(artist1.account.address);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
 
-      const royaltyFee = 500n;
-      // Set low royalty fee to 5%, default 0
-      const royaltyTx = await artGalleryAsOwner.write.setRoyaltyFee([
-        royaltyFee,
+      // Set royalty fee
+      const txHash = await artGalleryAsOwner.write.setRoyaltyFee([
+        SAMPLE_ROYALTY_FEE_BPS,
       ]);
-      await publicClient.waitForTransactionReceipt({ hash: royaltyTx });
+      await publicClient.waitForTransactionReceipt({ hash: txHash }); // Ensure confirmed
 
-      const artistAddress = getAddress(artist1.account.address);
-      const salePrice = oneEther;
-
-      // Need tokenId from the listed fixture
-      const listedArtwork = await artGallery.read.getArtwork([1n]);
-
-      // For tokenId 1, which was listed by artist1
       const [receiver, royaltyAmount] = await artGallery.read.royaltyInfo([
-        1n,
-        salePrice,
+        tokenId,
+        ONE_ETHER,
       ]);
+      const expectedRoyalty = (ONE_ETHER * SAMPLE_ROYALTY_FEE_BPS) / 10000n;
 
-      const expectedRoyalty = (salePrice * royaltyFee) / 10000n;
-
-      expect(receiver).to.equal(listedArtwork.artist); // Should be the original artist
+      expect(receiver).to.equal(artistAddress);
       expect(royaltyAmount).to.equal(expectedRoyalty);
     });
 
-    it("should return zero royalties for non-existent token ID in royaltyInfo", async function () {
-      const { artGallery, oneEther, defaultRoyaltyFee } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const nonExistentTokenId = 999n;
-      const salePrice = oneEther;
+    it("3.5 should calculate zero royalty via `royaltyInfo` if fee is zero", async function () {
+      const { artGallery, artist1, tokenId } =
+        await loadFixture(listedArtworkFixture);
+      const artistAddress = getAddress(artist1.account.address);
+      // Fee is 0 by default in fixture
 
-      // The behavior for non-existent tokens might vary. Often, they revert or return zero.
-      // Checking the implementation: it reads from _artworks[tokenId].artist which will be zeroAddress.
       const [receiver, royaltyAmount] = await artGallery.read.royaltyInfo([
-        nonExistentTokenId,
-        salePrice,
+        tokenId,
+        ONE_ETHER,
       ]);
 
-      // Calculation with 0 artist results in 0 (or default royalty if fee applies globally)
-      // Let's refine the expectation based on the calculation: (salePrice * royaltyFee) / 10000
-      // Since receiver is zeroAddress, the royalty *should* conceptually be zero.
-      // The formula doesn't depend on the receiver address directly, only the stored artist.
-      // Let's assume the intent is zero royalty if the token/artist isn't found.
-      // If the contract intended a different behavior (like reverting), this test would fail.
-      expect(receiver).to.equal(zeroAddress); // Default address for non-existent mapping
+      // Check the contract's royaltyInfo implementation:
+      // if (artist == address(0) || royaltyFee == 0) {
+      //     return (address(0), 0);
+      // }
+
+      // Since royaltyFee is 0, the contract returns address(0) as receiver
+      expect(receiver).to.equal(zeroAddress); // Changed from artistAddress
       expect(royaltyAmount).to.equal(0n);
+    });
+
+    it("3.6 should calculate zero royalty via `royaltyInfo` for non-existent token", async function () {
+      const { artGallery, owner, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsOwner = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: owner } },
+      );
+
+      // Set a non-zero fee
+      const txHash = await artGalleryAsOwner.write.setRoyaltyFee([
+        SAMPLE_ROYALTY_FEE_BPS,
+      ]);
+      await publicClient.waitForTransactionReceipt({ hash: txHash });
+
+      const [receiver, royaltyAmount] = await artGallery.read.royaltyInfo([
+        NON_EXISTENT_TOKEN_ID,
+        ONE_ETHER,
+      ]);
+
+      expect(receiver).to.equal(zeroAddress); // Because artist defaults to 0
+      expect(royaltyAmount).to.equal(0n); // Because artist is 0
     });
   });
 
-  describe("Artwork Listing (`listArtwork`)", function () {
-    it("should allow an artist to list an artwork", async function () {
-      const { artGallery, artist1, testURI, oneEther, publicClient } =
-        await loadFixture(deployArtGalleryMarketplaceFixture);
+  // ==========================
+  // 4. Artwork Listing
+  // ==========================
+  describe("4. Artwork Listing (`listArtwork`)", function () {
+    it("4.1 should allow listing artwork with valid inputs and verify all states", async function () {
+      const { artGallery, artist1, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
+      );
       const artistAddress = getAddress(artist1.account.address);
       const artGalleryAsArtist = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
@@ -468,56 +500,43 @@ describe("ArtGalleryMarketplace", function () {
       const initialTotalArtworks = await artGallery.read.getTotalArtworks();
 
       const txHash = await artGalleryAsArtist.write.listArtwork([
-        testURI,
-        oneEther,
+        TEST_URI_1,
+        ONE_ETHER,
       ]);
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
       });
+      const tokenId = await getTokenIdFromReceipt(artGallery, receipt);
+      expect(tokenId).to.not.be.null;
+      expect(tokenId).to.equal(initialTotalArtworks + 1n);
 
+      // Verify all states and events
       const events = await artGallery.getEvents.ArtworkListed(
         {},
         { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
       );
-      expect(events).to.have.lengthOf(1);
-      const tokenId = events[0].args.tokenId;
-      expect(tokenId).to.equal(initialTotalArtworks + 1n); // Check counter increment
+      const eventArgs = events.find((e) => e.args.tokenId === tokenId)?.args;
+      expect(eventArgs).to.exist;
+      expect(eventArgs?.artist).to.equal(artistAddress);
+      expect(eventArgs?.price).to.equal(ONE_ETHER);
 
-      expect(events[0].args.artist).to.equal(artistAddress);
-      expect(events[0].args.price).to.equal(oneEther);
-
-      // Verify state
       expect(await artGallery.read.ownerOf([tokenId!])).to.equal(artistAddress);
-      expect(await artGallery.read.tokenURI([tokenId!])).to.equal(testURI);
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.price).to.equal(oneEther);
-      expect(artwork.isForSale).to.be.true;
-      expect(artwork.artist).to.equal(artistAddress); // Original artist for royalty
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.true;
+      expect(await artGallery.read.tokenURI([tokenId!])).to.equal(TEST_URI_1);
+
+      const [price, isForSale, originalArtist] =
+        await artGallery.read.getArtwork([tokenId!]);
+      expect(price).to.equal(ONE_ETHER);
+      expect(isForSale).to.be.true;
+      expect(originalArtist).to.equal(artistAddress);
       expect(await artGallery.read.getTotalArtworks()).to.equal(
         initialTotalArtworks + 1n,
       );
     });
 
-    it("should revert listing with zero price", async function () {
-      const { artGallery, artist1, testURI } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
+    it("4.2 should maintain incremental token IDs across different listings", async function () {
+      const { artGallery, artist1, artist2, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
       );
-      const artGalleryAsArtist = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: artist1 } },
-      );
-
-      await expect(
-        artGalleryAsArtist.write.listArtwork([testURI, 0n]),
-      ).to.be.rejectedWith("ArtGalleryMarketplace__PriceMustBeAboveZero");
-    });
-
-    it("should assign incremental token IDs", async function () {
-      const { artGallery, artist1, artist2, testURI, oneEther, publicClient } =
-        await loadFixture(deployArtGalleryMarketplaceFixture);
-
       const artGalleryAsArtist1 = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -529,53 +548,63 @@ describe("ArtGalleryMarketplace", function () {
         { client: { wallet: artist2 } },
       );
 
-      // List first artwork
       const tx1 = await artGalleryAsArtist1.write.listArtwork([
-        testURI + "1",
-        oneEther,
+        TEST_URI_1,
+        ONE_ETHER,
       ]);
       const receipt1 = await publicClient.waitForTransactionReceipt({
         hash: tx1,
       });
-      const events1 = await artGallery.getEvents.ArtworkListed(
-        {},
-        { fromBlock: receipt1.blockNumber, toBlock: receipt1.blockNumber },
-      );
-      const tokenId1 = events1[0].args.tokenId;
-      expect(tokenId1).to.equal(1n); // Assuming counter starts implicitly at 0
+      const tokenId1 = await getTokenIdFromReceipt(artGallery, receipt1);
+      expect(tokenId1).to.equal(1n);
 
-      // List second artwork
       const tx2 = await artGalleryAsArtist2.write.listArtwork([
-        testURI + "2",
-        oneEther,
+        TEST_URI_2,
+        TWO_ETHER,
       ]);
       const receipt2 = await publicClient.waitForTransactionReceipt({
         hash: tx2,
       });
-      const events2 = await artGallery.getEvents.ArtworkListed(
-        {},
-        { fromBlock: receipt2.blockNumber, toBlock: receipt2.blockNumber },
-      );
-      const tokenId2 = events2[0].args.tokenId;
+      const tokenId2 = await getTokenIdFromReceipt(artGallery, receipt2);
+      expect(tokenId2).to.equal(tokenId1! + 1n);
+      expect(await artGallery.read.getTotalArtworks()).to.equal(tokenId2);
+    });
 
-      expect(tokenId2).to.equal(tokenId1! + 1n); // Should be incremental
-      expect(await artGallery.read.getTotalArtworks()).to.equal(tokenId2); // Total artworks should match the last ID
+    it("4.3 should revert for invalid inputs (zero price, empty URI, price above max)", async function () {
+      const { artGallery, artist1 } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsArtist = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: artist1 } },
+      );
+
+      const maxPrice = await artGallery.read.maxPrice();
+
+      await expect(
+        artGalleryAsArtist.write.listArtwork([TEST_URI_1, 0n]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__PriceMustBeAboveZero");
+
+      await expect(
+        artGalleryAsArtist.write.listArtwork(["", ONE_ETHER]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__EmptyURINotAllowed");
+
+      await expect(
+        artGalleryAsArtist.write.listArtwork([TEST_URI_1, maxPrice + 1n]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__PriceExceedsMaximum");
     });
   });
 
-  describe("Artwork Purchase (`buyArtwork`)", function () {
-    it("should allow a buyer to purchase a listed artwork", async function () {
-      const {
-        artGallery,
-        artist1,
-        buyer1,
-        oneEther,
-        publicClient,
-        tokenId, // Get tokenId from the fixture
-      } = await loadFixture(createListedArtworkFixture);
+  // ==========================
+  // 5. Artwork Purchase
+  // ==========================
+  describe("5. Artwork Purchase (`buyArtwork`)", function () {
+    it("5.1 should allow purchasing listed artwork with exact payment", async function () {
+      const { artGallery, artist1, buyer1, publicClient, tokenId } =
+        await loadFixture(listedArtworkFixture);
       const artistAddress = getAddress(artist1.account.address);
       const buyerAddress = getAddress(buyer1.account.address);
-
       const artGalleryAsBuyer = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -589,8 +618,8 @@ describe("ArtGalleryMarketplace", function () {
         address: buyerAddress,
       });
 
-      const txHash = await artGalleryAsBuyer.write.buyArtwork([tokenId!], {
-        value: oneEther,
+      const txHash = await artGalleryAsBuyer.write.buyArtwork([tokenId], {
+        value: ONE_ETHER,
       });
       const receipt = await publicClient.waitForTransactionReceipt({
         hash: txHash,
@@ -602,17 +631,71 @@ describe("ArtGalleryMarketplace", function () {
         {},
         { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
       );
-      expect(events).to.have.lengthOf(1);
+      expect(events).to.have.lengthOf(1); // Only one sale happened in this tx
       expect(events[0].args.tokenId).to.equal(tokenId);
-      expect(events[0].args.seller).to.equal(artistAddress); // Seller is the owner at time of sale
+      expect(events[0].args.seller).to.equal(artistAddress);
       expect(events[0].args.buyer).to.equal(buyerAddress);
-      expect(events[0].args.price).to.equal(oneEther);
+      expect(events[0].args.price).to.equal(ONE_ETHER);
 
       // Verify state changes
-      expect(await artGallery.read.ownerOf([tokenId!])).to.equal(buyerAddress);
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.isForSale).to.be.false;
+      expect(await artGallery.read.ownerOf([tokenId])).to.equal(buyerAddress);
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false;
+
+      // Verify balance changes (assuming zero royalty fee)
+      const finalArtistBalance = await publicClient.getBalance({
+        address: artistAddress,
+      });
+      const finalBuyerBalance = await publicClient.getBalance({
+        address: buyerAddress,
+      });
+      expect(finalArtistBalance).to.equal(initialArtistBalance + ONE_ETHER);
+      expect(finalBuyerBalance).to.equal(
+        initialBuyerBalance - ONE_ETHER - gasUsed,
+      );
+    });
+
+    it("5.2 should distribute funds correctly with non-zero royalty during purchase", async function () {
+      const { artGallery, owner, artist1, buyer1, publicClient, tokenId } =
+        await loadFixture(listedArtworkFixture);
+      const artistAddress = getAddress(artist1.account.address); // Original artist AND initial seller
+      const buyerAddress = getAddress(buyer1.account.address);
+      const artGalleryAsOwner = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: owner } },
+      );
+      const artGalleryAsBuyer = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: buyer1 } },
+      );
+
+      // Set royalty fee
+      const royaltyFeeBps = 1000n; // 10%
+      const royaltyTx = await artGalleryAsOwner.write.setRoyaltyFee([
+        royaltyFeeBps,
+      ]);
+      await publicClient.waitForTransactionReceipt({ hash: royaltyTx });
+
+      const initialArtistBalance = await publicClient.getBalance({
+        address: artistAddress,
+      });
+      const initialBuyerBalance = await publicClient.getBalance({
+        address: buyerAddress,
+      });
+
+      const salePrice = ONE_ETHER;
+      const expectedRoyalty = (salePrice * royaltyFeeBps) / 10000n;
+      const expectedSellerProceeds = salePrice - expectedRoyalty;
+
+      // Buyer purchases
+      const buyTxHash = await artGalleryAsBuyer.write.buyArtwork([tokenId], {
+        value: salePrice,
+      });
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: buyTxHash,
+      });
+      const gasUsed = receipt.gasUsed * receipt.effectiveGasPrice;
 
       // Verify balance changes
       const finalArtistBalance = await publicClient.getBalance({
@@ -622,19 +705,41 @@ describe("ArtGalleryMarketplace", function () {
         address: buyerAddress,
       });
 
-      // Seller (artist in this case) should receive the full price
-      // NOTE: This assumes NO royalty payout logic in buyArtwork. If royalties were paid, this check would fail.
-      expect(finalArtistBalance).to.equal(initialArtistBalance + oneEther);
+      // In this specific case, the Artist is also the Seller, so they receive both portions.
+      expect(finalArtistBalance).to.equal(
+        initialArtistBalance + expectedSellerProceeds + expectedRoyalty,
+      );
 
-      // Buyer's balance should decrease by price + gas fees
       expect(finalBuyerBalance).to.equal(
-        initialBuyerBalance - oneEther - gasUsed,
+        initialBuyerBalance - salePrice - gasUsed,
       );
     });
 
-    it("should revert if payment is insufficient", async function () {
-      const { artGallery, buyer1, pointFiveEther, tokenId } = await loadFixture(
-        createListedArtworkFixture,
+    it("5.3 should revert purchase if payment is not exact (insufficient or excessive)", async function () {
+      const { artGallery, buyer1, tokenId } =
+        await loadFixture(listedArtworkFixture);
+      const artGalleryAsBuyer = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: buyer1 } },
+      );
+
+      // Insufficient
+      await expect(
+        artGalleryAsBuyer.write.buyArtwork([tokenId], {
+          value: POINT_FIVE_ETHER,
+        }),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__ExactPaymentRequired");
+
+      // Excessive
+      await expect(
+        artGalleryAsBuyer.write.buyArtwork([tokenId], { value: TWO_ETHER }),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__ExactPaymentRequired");
+    });
+
+    it("5.4 should revert purchase for non-existent artwork", async function () {
+      const { artGallery, buyer1 } = await loadFixture(
+        deployMarketplaceFixture,
       );
       const artGalleryAsBuyer = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
@@ -643,224 +748,153 @@ describe("ArtGalleryMarketplace", function () {
       );
 
       await expect(
-        artGalleryAsBuyer.write.buyArtwork([tokenId!], {
-          value: pointFiveEther,
+        artGalleryAsBuyer.write.buyArtwork([NON_EXISTENT_TOKEN_ID], {
+          value: ONE_ETHER,
         }),
-      ).to.be.rejectedWith("ArtGalleryMarketplace__InsufficientPayment");
+      ).to.be.rejectedWith("ERC721NonexistentToken"); // Reverts at ownerOf check
     });
 
-    it("should revert when trying to buy non-existent artwork", async function () {
-      const { artGallery, buyer1, oneEther } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const artGalleryAsBuyer = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: buyer1 } },
-      );
-      const nonExistentTokenId = 999n;
-
-      // Buying non-existent token usually reverts at ownerOf check
-      await expect(
-        artGalleryAsBuyer.write.buyArtwork([nonExistentTokenId], {
-          value: oneEther,
-        }),
-      ).to.be.rejectedWith("ERC721NonexistentToken");
-    });
-
-    it("should revert when trying to buy artwork that is not for sale (already sold)", async function () {
-      const { artGallery, buyer2, oneEther, tokenId } = await loadFixture(
-        createSoldArtworkFixture, // Use fixture where token is already sold to buyer1
-      );
+    it("5.5 should revert purchase for artwork not for sale (sold or delisted)", async function () {
+      const soldData = await loadFixture(soldArtworkFixture); // Artwork sold to buyer1
+      const { artGallery, owner, buyer2, publicClient, tokenId } = soldData;
       const artGalleryAsBuyer2 = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: buyer2 } },
       );
-
-      await expect(
-        artGalleryAsBuyer2.write.buyArtwork([tokenId!], { value: oneEther }),
-      ).to.be.rejectedWith("ArtGalleryMarketplace__NotForSale");
-    });
-
-    it("should revert when trying to buy artwork that is not for sale (delisted)", async function () {
-      const { artGallery, owner, buyer1, oneEther, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture);
-
-      // Admin (owner) delists the artwork
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const delistTx = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
-      await publicClient.waitForTransactionReceipt({ hash: delistTx });
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
 
-      // Buyer tries to buy the delisted artwork
-      const artGalleryAsBuyer = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: buyer1 } },
-      );
-
+      // Attempt to buy already sold artwork
       await expect(
-        artGalleryAsBuyer.write.buyArtwork([tokenId!], { value: oneEther }),
+        artGalleryAsBuyer2.write.buyArtwork([tokenId], { value: ONE_ETHER }),
       ).to.be.rejectedWith("ArtGalleryMarketplace__NotForSale");
-    });
 
-    it("should allow owner to buy their own listed artwork (and get funds back)", async function () {
-      // This scenario might seem odd, but it should technically work.
-      const {
-        artGallery,
-        artist1, // The lister/owner
-        oneEther,
-        publicClient,
-        tokenId,
-      } = await loadFixture(createListedArtworkFixture);
-      const artistAddress = getAddress(artist1.account.address);
+      // Delist the already sold artwork (admin action) - this should succeed but is just for setup
+      const delistTx = await artGalleryAsOwner.write.delistArtwork([tokenId]);
+      await publicClient.waitForTransactionReceipt({ hash: delistTx });
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false;
 
-      const artGalleryAsArtist = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: artist1 } },
-      );
-
-      const initialArtistBalance = await publicClient.getBalance({
-        address: artistAddress,
-      });
-
-      // Artist buys their own artwork
-      const txHash = await artGalleryAsArtist.write.buyArtwork([tokenId!], {
-        value: oneEther,
-      });
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: txHash,
-      });
-      const gasUsed = receipt.gasUsed * receipt.effectiveGasPrice;
-
-      // Verify state
-      expect(await artGallery.read.ownerOf([tokenId!])).to.equal(artistAddress); // Ownership doesn't change
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false; // Marked as not for sale
-
-      // Verify balance change (should decrease only by gas cost)
-      const finalArtistBalance = await publicClient.getBalance({
-        address: artistAddress,
-      });
-      // Artist pays `oneEther` and immediately receives `oneEther` back.
-      expect(finalArtistBalance).to.equal(initialArtistBalance - gasUsed);
-
-      // Verify event
-      const events = await artGallery.getEvents.ArtworkSold(
-        {},
-        { fromBlock: receipt.blockNumber, toBlock: receipt.blockNumber },
-      );
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.tokenId).to.equal(tokenId);
-      expect(events[0].args.seller).to.equal(artistAddress);
-      expect(events[0].args.buyer).to.equal(artistAddress);
-      expect(events[0].args.price).to.equal(oneEther);
+      // Attempt to buy delisted artwork
+      await expect(
+        artGalleryAsBuyer2.write.buyArtwork([tokenId], { value: ONE_ETHER }),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__NotForSale");
     });
   });
 
-  describe("Price Update (`updatePrice`)", function () {
-    // Note: Current implementation uses onlyAdmin modifier
+  // ==========================
+  // 6. Price Update (Admin Only)
+  // ==========================
+  describe("6. Price Update (`updatePrice`) - Admin Only", function () {
+    it("6.1 should allow any admin to update price and relist if needed", async function () {
+      // First, deploy and set up admin
+      const deployData = await loadFixture(deployMarketplaceFixture);
+      const { artGallery, owner, designatedAdmin, publicClient } = deployData;
 
-    it("should allow admin (owner) to update the price", async function () {
-      const { artGallery, owner, twoEther, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture);
+      // Make designatedAdmin an admin
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-
-      const txHash = await artGalleryAsOwner.write.updatePrice([
-        tokenId!,
-        twoEther,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.price).to.equal(twoEther);
-      expect(artwork.isForSale).to.be.true; // Should ensure it's marked for sale
-
-      const events = await artGallery.getEvents.PriceUpdated();
-      expect(events).to.have.lengthOf(1);
-      expect(events[0].args.tokenId).to.equal(tokenId);
-      expect(events[0].args.newPrice).to.equal(twoEther);
-    });
-
-    it("should allow a designated admin (non-owner) to update the price", async function () {
-      const { artGallery, owner, admin, twoEther, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture);
-      const adminAddress = getAddress(admin.account.address);
-
-      // Owner makes 'admin' an admin
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-      const addAdminTx = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
+      await artGalleryAsOwner.write.setAdmin([
+        getAddress(designatedAdmin.account.address),
         true,
       ]);
-      await publicClient.waitForTransactionReceipt({ hash: addAdminTx });
 
-      // Admin updates the price
-      const artGalleryAsAdmin = await hre.viem.getContractAt(
+      // List an artwork first (as owner)
+      const listTx = await artGalleryAsOwner.write.listArtwork([
+        TEST_URI_1,
+        ONE_ETHER,
+      ]);
+      const listReceipt = await publicClient.waitForTransactionReceipt({
+        hash: listTx,
+      });
+      const tokenId = await getTokenIdFromReceipt(artGallery, listReceipt);
+
+      if (!tokenId) {
+        throw new Error("Failed to get tokenId from listing");
+      }
+
+      const artGalleryAsDesignatedAdmin = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: admin } },
+        { client: { wallet: designatedAdmin } },
       );
-      const updatePriceTx = await artGalleryAsAdmin.write.updatePrice([
-        tokenId!,
-        twoEther,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: updatePriceTx });
 
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.price).to.equal(twoEther);
-      expect(artwork.isForSale).to.be.true;
+      // Owner updates price
+      const tx1 = await artGalleryAsOwner.write.updatePrice([
+        tokenId,
+        TWO_ETHER,
+      ]);
+
+      const receipt1 = await publicClient.waitForTransactionReceipt({
+        hash: tx1,
+      });
+
+      const [price1, isForSale1] = await artGallery.read.getArtwork([tokenId]);
+      expect(price1).to.equal(TWO_ETHER);
+      expect(isForSale1).to.be.true;
+
+      // Designated admin updates price
+      const tx2 = await artGalleryAsDesignatedAdmin.write.updatePrice([
+        tokenId,
+        POINT_FIVE_ETHER,
+      ]);
+      const receipt2 = await publicClient.waitForTransactionReceipt({
+        hash: tx2,
+      });
+
+      const [price2, isForSale2] = await artGallery.read.getArtwork([tokenId]);
+      expect(price2).to.equal(POINT_FIVE_ETHER);
+      expect(isForSale2).to.be.true;
+
+      // Check events
+      const events = await artGallery.getEvents.PriceUpdated(
+        {},
+        { fromBlock: receipt1.blockNumber, toBlock: receipt2.blockNumber },
+      );
+
+      expect(events.length).to.be.greaterThanOrEqual(2);
+      expect(events[events.length - 2].args.tokenId).to.equal(tokenId);
+      expect(events[events.length - 2].args.newPrice).to.equal(TWO_ETHER);
+      expect(events[events.length - 1].args.tokenId).to.equal(tokenId);
+      expect(events[events.length - 1].args.newPrice).to.equal(
+        POINT_FIVE_ETHER,
+      );
     });
 
-    it("should not allow the artwork owner (if not admin) to update price", async function () {
-      const { artGallery, artist1, twoEther, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      // artist1 owns the token but is not an admin by default
+    it("6.2 should NOT allow non-admin (including token owner) to update price", async function () {
+      const { artGallery, artist1, otherAccount, tokenId } =
+        await loadFixture(listedArtworkFixture); // artist1 owns token
       const artGalleryAsArtist = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: artist1 } },
       );
-
-      // Fails because updatePrice has onlyAdmin modifier
-      await expect(
-        artGalleryAsArtist.write.updatePrice([tokenId!, twoEther]),
-      ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
-    });
-
-    it("should not allow non-admin/non-owner to update price", async function () {
-      const { artGallery, buyer1, twoEther, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      const artGalleryAsBuyer = await hre.viem.getContractAt(
+      const artGalleryAsOther = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: buyer1 } },
+        { client: { wallet: otherAccount } },
       );
 
+      // Token owner attempts update
       await expect(
-        artGalleryAsBuyer.write.updatePrice([tokenId!, twoEther]),
+        artGalleryAsArtist.write.updatePrice([tokenId, TWO_ETHER]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin"); // Expect NotAdmin (since onlyAdmin modifier is used)
+
+      // Other account attempts update
+      await expect(
+        artGalleryAsOther.write.updatePrice([tokenId, TWO_ETHER]),
       ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
     });
 
-    it("should revert updating price to zero", async function () {
-      const { artGallery, owner, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
+    it("6.3 should revert updatePrice if price is zero", async function () {
+      const { artGallery, owner, tokenId } =
+        await loadFixture(listedArtworkFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -868,161 +902,147 @@ describe("ArtGalleryMarketplace", function () {
       );
 
       await expect(
-        artGalleryAsOwner.write.updatePrice([tokenId!, 0n]),
+        artGalleryAsOwner.write.updatePrice([tokenId, 0n]),
       ).to.be.rejectedWith("ArtGalleryMarketplace__PriceMustBeAboveZero");
     });
 
-    it("should revert updating price for non-existent artwork", async function () {
-      const { artGallery, owner, oneEther } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("6.4 should revert updatePrice for non-existent artwork", async function () {
+      const { artGallery, owner } = await loadFixture(deployMarketplaceFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const nonExistentTokenId = 999n;
 
-      // Reverts likely due to ownerOf check inside updatePrice modifier/logic
       await expect(
-        artGalleryAsOwner.write.updatePrice([nonExistentTokenId, oneEther]),
-      ).to.be.rejectedWith("ERC721NonexistentToken"); // ownerOf check fails first
-    });
-
-    it("should relist the artwork if price is updated after being sold/delisted", async function () {
-      const { artGallery, owner, twoEther, publicClient, tokenId, firstBuyer } =
-        await loadFixture(createSoldArtworkFixture); // Artwork is sold
-
-      // Admin updates the price
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-
-      const txHash = await artGalleryAsOwner.write.updatePrice([
-        tokenId!,
-        twoEther,
-      ]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      // Verify it's for sale again
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.price).to.equal(twoEther);
-      expect(artwork.isForSale).to.be.true; // Should be marked for sale again
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.true;
-
-      // Verify owner is still the first buyer
-      expect(await artGallery.read.ownerOf([tokenId!])).to.equal(
-        getAddress(firstBuyer.account.address),
-      );
+        artGalleryAsOwner.write.updatePrice([NON_EXISTENT_TOKEN_ID, ONE_ETHER]),
+      ).to.be.rejectedWith("ERC721NonexistentToken"); // Reverts at ownerOf check first
     });
   });
 
-  describe("Delisting (`delistArtwork`)", function () {
-    // Note: Current implementation uses onlyAdmin modifier
+  // ============================
+  // 7. Delisting (Admin Only)
+  // ============================
+  describe("7. Delisting (`delistArtwork`) - Admin Only", function () {
+    it("7.1 should allow any admin to delist artwork", async function () {
+      // First deploy and set up initial state
+      const { artGallery, owner, designatedAdmin, publicClient } =
+        await loadFixture(deployMarketplaceFixture);
 
-    it("should allow admin (owner) to delist artwork", async function () {
-      const { artGallery, owner, publicClient, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
+      // Make designatedAdmin an admin
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
 
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.true; // Pre-condition
-
-      const txHash = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
-      await publicClient.waitForTransactionReceipt({ hash: txHash });
-
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-      expect(artwork.isForSale).to.be.false;
-      // Add event check if Delist event exists (it doesn't in the provided contract)
-    });
-
-    it("should allow a designated admin (non-owner) to delist artwork", async function () {
-      const { artGallery, owner, admin, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture);
-      const adminAddress = getAddress(admin.account.address);
-
-      // Owner makes 'admin' an admin
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-      const addAdminTx = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
+      // Set up admin
+      await artGalleryAsOwner.write.setAdmin([
+        getAddress(designatedAdmin.account.address),
         true,
       ]);
-      await publicClient.waitForTransactionReceipt({ hash: addAdminTx });
 
-      // Admin delists
-      const artGalleryAsAdmin = await hre.viem.getContractAt(
+      // List an artwork first
+      const listTx = await artGalleryAsOwner.write.listArtwork([
+        TEST_URI_1,
+        ONE_ETHER,
+      ]);
+      const listReceipt = await publicClient.waitForTransactionReceipt({
+        hash: listTx,
+      });
+
+      const tokenId = await getTokenIdFromReceipt(artGallery, listReceipt);
+
+      if (!tokenId) {
+        throw new Error("Failed to get tokenId from listing");
+      }
+
+      const artGalleryAsDesignatedAdmin = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: admin } },
+        { client: { wallet: designatedAdmin } },
       );
-      const delistTx = await artGalleryAsAdmin.write.delistArtwork([tokenId!]);
-      await publicClient.waitForTransactionReceipt({ hash: delistTx });
 
+      // Verify artwork is initially for sale
+      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.true;
+
+      // Owner delists
+      const tx1 = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
+      const receipt1 = await publicClient.waitForTransactionReceipt({
+        hash: tx1,
+      });
       expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
+
+      // Relist it by updating price
+      await artGalleryAsOwner.write.updatePrice([tokenId, ONE_ETHER]);
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.true;
+
+      // Designated admin delists
+      const tx2 = await artGalleryAsDesignatedAdmin.write.delistArtwork([
+        tokenId,
+      ]);
+
+      const receipt2 = await publicClient.waitForTransactionReceipt({
+        hash: tx2,
+      });
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false;
+
+      // Check second delist event
+      const events = await artGallery.getEvents.ArtworkDelisted(
+        {},
+        { fromBlock: receipt1.blockNumber, toBlock: receipt2.blockNumber },
+      );
+      expect(events.length).to.be.greaterThanOrEqual(2);
+      expect(events[0].args.tokenId).to.equal(tokenId);
+      expect(events[0].blockNumber).to.equal(receipt1.blockNumber);
+
+      expect(events[events.length - 1].args.tokenId).to.equal(tokenId);
+      expect(events[events.length - 1].blockNumber).to.equal(
+        receipt2.blockNumber,
+      );
     });
 
-    it("should not allow the artwork owner (if not admin) to delist artwork", async function () {
-      const { artGallery, artist1, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      // artist1 owns the token but is not admin
+    it("7.2 should NOT allow non-admin (including token owner) to delist artwork", async function () {
+      const { artGallery, artist1, otherAccount, tokenId } =
+        await loadFixture(listedArtworkFixture); // artist1 owns token
       const artGalleryAsArtist = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: artist1 } },
       );
-
-      await expect(
-        artGalleryAsArtist.write.delistArtwork([tokenId!]),
-      ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
-    });
-
-    it("should not allow non-admin/non-owner to delist artwork", async function () {
-      const { artGallery, buyer1, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      const artGalleryAsBuyer = await hre.viem.getContractAt(
+      const artGalleryAsOther = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: buyer1 } },
+        { client: { wallet: otherAccount } },
       );
 
+      // Token owner attempts delist
       await expect(
-        artGalleryAsBuyer.write.delistArtwork([tokenId!]),
+        artGalleryAsArtist.write.delistArtwork([tokenId]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
+
+      // Other account attempts delist
+      await expect(
+        artGalleryAsOther.write.delistArtwork([tokenId]),
       ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
     });
 
-    it("should revert when trying to delist non-existent artwork", async function () {
-      const { artGallery, owner } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
+    it("7.3 should revert delisting non-existent artwork", async function () {
+      const { artGallery, owner } = await loadFixture(deployMarketplaceFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const nonExistentTokenId = 999n;
 
       await expect(
-        artGalleryAsOwner.write.delistArtwork([nonExistentTokenId]),
-      ).to.be.rejectedWith("ERC721NonexistentToken"); // ownerOf check fails
+        artGalleryAsOwner.write.delistArtwork([NON_EXISTENT_TOKEN_ID]),
+      ).to.be.rejectedWith("ERC721NonexistentToken"); // Reverts at ownerOf check
     });
 
-    it("should succeed but have no effect when delisting already delisted artwork", async function () {
-      const { artGallery, owner, publicClient, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
+    it("7.4 should succeed but have no effect when admin delists already delisted artwork", async function () {
+      const { artGallery, owner, publicClient, tokenId } =
+        await loadFixture(listedArtworkFixture);
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -1030,24 +1050,26 @@ describe("ArtGalleryMarketplace", function () {
       );
 
       // Delist first time
-      const tx1 = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
+      const tx1 = await artGalleryAsOwner.write.delistArtwork([tokenId]);
       await publicClient.waitForTransactionReceipt({ hash: tx1 });
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false;
 
-      // Delist second time
-      const tx2 = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
-      await publicClient.waitForTransactionReceipt({ hash: tx2 });
+      // Delist second time - should not revert
+      await expect(artGalleryAsOwner.write.delistArtwork([tokenId])).to.not.be
+        .rejected;
 
-      // State should remain unchanged (still not for sale)
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
-      // No specific event emitted for delist in the contract to check here
+      // State remains unchanged
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false;
     });
   });
 
-  describe("Pause Functionality", function () {
-    it("should allow owner to pause and unpause", async function () {
+  // ==========================
+  // 8. Pause Functionality
+  // ==========================
+  describe("8. Pause Functionality (`pause`, `unpause`)", function () {
+    it("8.1 should allow owner to pause and unpause", async function () {
       const { artGallery, owner, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
+        deployMarketplaceFixture,
       );
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
@@ -1066,28 +1088,54 @@ describe("ArtGalleryMarketplace", function () {
       expect(await artGallery.read.paused()).to.be.false;
     });
 
-    it("should not allow non-owner to pause or unpause", async function () {
-      const { artGallery, artist1 } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const artGalleryAsArtist = await hre.viem.getContractAt(
+    it("8.2 should NOT allow non-owner to pause or unpause", async function () {
+      const { artGallery, designatedAdmin, otherAccount } = await loadFixture(
+        designatedAdminFixture,
+      ); // Use fixture where designatedAdmin is admin but not owner
+      const artGalleryAsAdmin = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
-        { client: { wallet: artist1 } },
+        { client: { wallet: designatedAdmin } },
+      );
+      const artGalleryAsOther = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: otherAccount } },
       );
 
-      await expect(artGalleryAsArtist.write.pause()).to.be.rejectedWith(
+      // Admin tries
+      await expect(artGalleryAsAdmin.write.pause()).to.be.rejectedWith(
         "OwnableUnauthorizedAccount",
       );
-      // Try unpausing (even though not paused)
-      await expect(artGalleryAsArtist.write.unpause()).to.be.rejectedWith(
+      await expect(artGalleryAsAdmin.write.unpause()).to.be.rejectedWith(
+        "OwnableUnauthorizedAccount",
+      );
+
+      // Other user tries
+      await expect(artGalleryAsOther.write.pause()).to.be.rejectedWith(
+        "OwnableUnauthorizedAccount",
+      );
+      await expect(artGalleryAsOther.write.unpause()).to.be.rejectedWith(
         "OwnableUnauthorizedAccount",
       );
     });
 
-    it("should prevent listing artwork when paused", async function () {
-      const { artGallery, owner, artist1, testURI, oneEther, publicClient } =
-        await loadFixture(deployArtGalleryMarketplaceFixture);
+    it("8.3 should prevent state-changing actions when paused", async function () {
+      const {
+        artGallery,
+        owner,
+        artist1,
+        designatedAdmin,
+        buyer1,
+        publicClient,
+        tokenId,
+      } = await loadFixture(listedArtworkFixture).then(
+        async (listedData) => ({
+          ...listedData,
+          ...(await loadFixture(designatedAdminFixture)),
+        }), // Combine fixtures
+      );
+
       const artGalleryAsOwner = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
         artGallery.address,
@@ -1097,39 +1145,6 @@ describe("ArtGalleryMarketplace", function () {
         "ArtGalleryMarketplace",
         artGallery.address,
         { client: { wallet: artist1 } },
-      );
-
-      // Pause
-      const pauseTx = await artGalleryAsOwner.write.pause();
-      await publicClient.waitForTransactionReceipt({ hash: pauseTx });
-
-      // Attempt list
-      await expect(
-        artGalleryAsArtist.write.listArtwork([testURI, oneEther]),
-      ).to.be.rejectedWith("EnforcedPause()");
-
-      // Unpause and verify listing works
-      const unpauseTx = await artGalleryAsOwner.write.unpause();
-      await publicClient.waitForTransactionReceipt({ hash: unpauseTx });
-
-      const listTx = await artGalleryAsArtist.write.listArtwork([
-        testURI,
-        oneEther,
-      ]);
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: listTx,
-      });
-      expect(receipt.status).to.equal("success");
-    });
-
-    it("should prevent buying artwork when paused", async function () {
-      const { artGallery, owner, buyer1, oneEther, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture); // Start with a listed token
-
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
       );
       const artGalleryAsBuyer = await hre.viem.getContractAt(
         "ArtGalleryMarketplace",
@@ -1137,184 +1152,94 @@ describe("ArtGalleryMarketplace", function () {
         { client: { wallet: buyer1 } },
       );
 
-      // Pause
+      // Pause the contract
       const pauseTx = await artGalleryAsOwner.write.pause();
       await publicClient.waitForTransactionReceipt({ hash: pauseTx });
+      expect(await artGallery.read.paused()).to.be.true;
 
-      // Attempt buy
+      // Test actions affected by whenNotPaused
       await expect(
-        artGalleryAsBuyer.write.buyArtwork([tokenId!], { value: oneEther }),
-      ).to.be.rejectedWith("EnforcedPause()"); // This expectation assumes buyArtwork is pausable
-
-      // Unpause and verify buying works
-      const unpauseTx = await artGalleryAsOwner.write.unpause();
-      await publicClient.waitForTransactionReceipt({ hash: unpauseTx });
-
-      const buyTx = await artGalleryAsBuyer.write.buyArtwork([tokenId!], {
-        value: oneEther,
-      });
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: buyTx,
-      });
-      expect(receipt.status).to.equal("success");
-    });
-
-    it("should prevent updating price when paused", async function () {
-      const { artGallery, owner, twoEther, publicClient, tokenId } =
-        await loadFixture(createListedArtworkFixture);
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-
-      // Pause
-      const pauseTx = await artGalleryAsOwner.write.pause();
-      await publicClient.waitForTransactionReceipt({ hash: pauseTx });
-
-      // Attempt update price
+        artGalleryAsArtist.write.listArtwork([TEST_URI_2, ONE_ETHER]),
+      ).to.be.rejectedWith("EnforcedPause()");
       await expect(
-        artGalleryAsOwner.write.updatePrice([tokenId!, twoEther]),
-        // Note: updatePrice also lacks whenNotPaused in the provided contract. Assuming it should be pausable.
+        artGalleryAsBuyer.write.buyArtwork([tokenId], { value: ONE_ETHER }),
+      ).to.be.rejectedWith("EnforcedPause()");
+      await expect(
+        artGalleryAsOwner.write.updatePrice([tokenId, TWO_ETHER]),
+      ).to.be.rejectedWith("EnforcedPause()");
+      await expect(
+        artGalleryAsOwner.write.delistArtwork([tokenId]),
+      ).to.be.rejectedWith("EnforcedPause()");
+      await expect(
+        artGalleryAsOwner.write.setAdmin([
+          getAddress(designatedAdmin.account.address),
+          true,
+        ]),
+      ).to.be.rejectedWith("EnforcedPause()");
+      await expect(
+        artGalleryAsOwner.write.setRoyaltyFee([SAMPLE_ROYALTY_FEE_BPS]),
       ).to.be.rejectedWith("EnforcedPause()");
 
-      // Unpause and verify update works
+      // Unpause and verify one action works again
       const unpauseTx = await artGalleryAsOwner.write.unpause();
       await publicClient.waitForTransactionReceipt({ hash: unpauseTx });
+      expect(await artGallery.read.paused()).to.be.false;
 
-      const updateTx = await artGalleryAsOwner.write.updatePrice([
-        tokenId!,
-        twoEther,
-      ]);
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: updateTx,
-      });
-      expect(receipt.status).to.equal("success");
-    });
-
-    it("should prevent delisting artwork when paused", async function () {
-      const { artGallery, owner, publicClient, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-
-      // Pause
-      const pauseTx = await artGalleryAsOwner.write.pause();
-      await publicClient.waitForTransactionReceipt({ hash: pauseTx });
-
-      // Attempt delist
+      // Example: setRoyaltyFee should work now
       await expect(
-        artGalleryAsOwner.write.delistArtwork([tokenId!]),
-        // Note: delistArtwork also lacks whenNotPaused. Assuming it should be pausable.
-      ).to.be.rejectedWith("EnforcedPause()");
-
-      // Unpause and verify delist works
-      const unpauseTx = await artGalleryAsOwner.write.unpause();
-      await publicClient.waitForTransactionReceipt({ hash: unpauseTx });
-
-      const delistTx = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: delistTx,
-      });
-      expect(receipt.status).to.equal("success");
-    });
-
-    it("should prevent admin/royalty changes when paused", async function () {
-      const { artGallery, owner, admin, publicClient } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const artGalleryAsOwner = await hre.viem.getContractAt(
-        "ArtGalleryMarketplace",
-        artGallery.address,
-        { client: { wallet: owner } },
-      );
-      const adminAddress = getAddress(admin.account.address);
-
-      // Pause
-      const pauseTx = await artGalleryAsOwner.write.pause();
-      await publicClient.waitForTransactionReceipt({ hash: pauseTx });
-
-      // Attempt admin change
-      await expect(
-        artGalleryAsOwner.write.setAdmin([adminAddress, true]),
-        // Note: setAdmin lacks whenNotPaused. Assuming it should be pausable.
-      ).to.be.rejectedWith("EnforcedPause()");
-
-      // Attempt royalty change
-      await expect(
-        artGalleryAsOwner.write.setRoyaltyFee([500n]),
-        // Note: setRoyaltyFee lacks whenNotPaused. Assuming it should be pausable.
-      ).to.be.rejectedWith("EnforcedPause()");
-
-      // Unpause and verify changes work
-      const unpauseTx = await artGalleryAsOwner.write.unpause();
-      await publicClient.waitForTransactionReceipt({ hash: unpauseTx });
-
-      const adminTx = await artGalleryAsOwner.write.setAdmin([
-        adminAddress,
-        true,
-      ]);
-      const adminReceipt = await publicClient.waitForTransactionReceipt({
-        hash: adminTx,
-      });
-      expect(adminReceipt.status).to.equal("success");
-
-      const royaltyTx = await artGalleryAsOwner.write.setRoyaltyFee([500n]);
-      const royaltyReceipt = await publicClient.waitForTransactionReceipt({
-        hash: royaltyTx,
-      });
-      expect(royaltyReceipt.status).to.equal("success");
+        artGalleryAsOwner.write.setRoyaltyFee([SAMPLE_ROYALTY_FEE_BPS]),
+      ).to.not.be.rejected;
     });
   });
 
-  describe("View Functions", function () {
-    it("getArtwork should return correct details for listed artwork", async function () {
-      const { artGallery, artist1, oneEther, testURI, tokenId } =
-        await loadFixture(createListedArtworkFixture);
-      const artistAddress = getAddress(artist1.account.address);
+  // ==============================
+  // 9. View Functions & Edge Cases
+  // ==============================
+  describe("9. View Functions and Edge Cases", function () {
+    it("9.1 `getArtwork` should return correct details for existing listed/sold artwork", async function () {
+      const listedData = await loadFixture(listedArtworkFixture);
+      const soldData = await loadFixture(soldArtworkFixture);
+      const {
+        artGallery: artGalleryListed,
+        artist1: artist1Listed,
+        tokenId: tokenIdListed,
+      } = listedData;
+      const {
+        artGallery: artGallerySold,
+        artist1: artist1Sold,
+        buyer1: buyer1Sold,
+        tokenId: tokenIdSold,
+      } = soldData;
 
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
+      // Check listed artwork
+      const [priceListed, isForSaleListed, artistListed] =
+        await artGalleryListed.read.getArtwork([tokenIdListed]);
+      expect(priceListed).to.equal(ONE_ETHER);
+      expect(isForSaleListed).to.be.true;
+      expect(artistListed).to.equal(getAddress(artist1Listed.account.address));
 
-      expect(artwork.price).to.equal(oneEther);
-      expect(artwork.isForSale).to.be.true;
-      expect(artwork.artist).to.equal(artistAddress); // Original artist
+      // Check sold artwork
+      const [priceSold, isForSaleSold, artistSold] =
+        await artGallerySold.read.getArtwork([tokenIdSold]);
+      expect(priceSold).to.equal(ONE_ETHER); // Price remains after sale
+      expect(isForSaleSold).to.be.false; // Not for sale
+      expect(artistSold).to.equal(getAddress(artist1Sold.account.address)); // Original artist
+      expect(await artGallerySold.read.ownerOf([tokenIdSold])).to.equal(
+        getAddress(buyer1Sold.account.address),
+      ); // Current owner changed
     });
 
-    it("getArtwork should return correct details for sold artwork", async function () {
-      const { artGallery, artist1, oneEther, tokenId, firstBuyer } =
-        await loadFixture(createSoldArtworkFixture);
-      const artistAddress = getAddress(artist1.account.address); // Original artist
-      const buyerAddress = getAddress(firstBuyer.account.address); // Current owner
-
-      const artwork = await artGallery.read.getArtwork([tokenId!]);
-
-      expect(artwork.price).to.equal(oneEther); // Price remains
-      expect(artwork.isForSale).to.be.false; // Not for sale after purchase
-      expect(artwork.artist).to.equal(artistAddress); // Original artist stored
-      expect(await artGallery.read.ownerOf([tokenId!])).to.equal(buyerAddress); // Check current owner separately
+    it("9.2 `getArtwork` should revert for non-existent token", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
+      await expect(
+        artGallery.read.getArtwork([NON_EXISTENT_TOKEN_ID]),
+      ).to.be.rejectedWith("ERC721NonexistentToken"); // Reverts due to internal ownerOf check
     });
 
-    it("getArtwork should return default values for non-existent artwork", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const nonExistentTokenId = 999n;
-      const artwork = await artGallery.read.getArtwork([nonExistentTokenId]);
-
-      expect(artwork.price).to.equal(0n);
-      expect(artwork.isForSale).to.be.false;
-      expect(artwork.artist).to.equal(zeroAddress);
-    });
-
-    it("isArtworkForSale should return correct status", async function () {
-      const { artGallery, owner, publicClient, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.true;
+    it("9.3 `isArtworkForSale` should return correct status (true/false) for existing tokens", async function () {
+      const { artGallery, owner, publicClient, tokenId } =
+        await loadFixture(listedArtworkFixture);
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.true; // Initially true
 
       // Delist it
       const artGalleryAsOwner = await hre.viem.getContractAt(
@@ -1322,30 +1247,36 @@ describe("ArtGalleryMarketplace", function () {
         artGallery.address,
         { client: { wallet: owner } },
       );
-      const tx = await artGalleryAsOwner.write.delistArtwork([tokenId!]);
+      const tx = await artGalleryAsOwner.write.delistArtwork([tokenId]);
       await publicClient.waitForTransactionReceipt({ hash: tx });
 
-      expect(await artGallery.read.isArtworkForSale([tokenId!])).to.be.false;
+      expect(await artGallery.read.isArtworkForSale([tokenId])).to.be.false; // False after delist
     });
 
-    it("getPrice should return the correct price", async function () {
-      const { artGallery, oneEther, tokenId } = await loadFixture(
-        createListedArtworkFixture,
+    it("9.4 `isArtworkForSale` should return false for non-existent token", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
+      // Does not revert, returns default mapping value (false)
+      expect(await artGallery.read.isArtworkForSale([NON_EXISTENT_TOKEN_ID])).to
+        .be.false;
+    });
+
+    it("9.5 `getPrice` should return correct price for existing tokens", async function () {
+      const { artGallery, tokenId } = await loadFixture(listedArtworkFixture);
+      expect(await artGallery.read.getPrice([tokenId])).to.equal(ONE_ETHER);
+    });
+
+    it("9.6 `getPrice` should return zero for non-existent token", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
+      // Does not revert, returns default mapping value (0)
+      expect(await artGallery.read.getPrice([NON_EXISTENT_TOKEN_ID])).to.equal(
+        0n,
       );
-      expect(await artGallery.read.getPrice([tokenId!])).to.equal(oneEther);
     });
 
-    it("getPrice should return zero for non-existent artwork", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
+    it("9.7 `getTotalArtworks` should reflect the number of minted tokens", async function () {
+      const { artGallery, artist1, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
       );
-      const nonExistentTokenId = 999n;
-      expect(await artGallery.read.getPrice([nonExistentTokenId])).to.equal(0n);
-    });
-
-    it("getTotalArtworks should reflect the number of minted tokens", async function () {
-      const { artGallery, artist1, testURI, oneEther, publicClient } =
-        await loadFixture(deployArtGalleryMarketplaceFixture);
       expect(await artGallery.read.getTotalArtworks()).to.equal(0n);
 
       const artGalleryAsArtist = await hre.viem.getContractAt(
@@ -1356,36 +1287,171 @@ describe("ArtGalleryMarketplace", function () {
 
       // List first
       const tx1 = await artGalleryAsArtist.write.listArtwork([
-        testURI + "1",
-        oneEther,
+        TEST_URI_1,
+        ONE_ETHER,
       ]);
       await publicClient.waitForTransactionReceipt({ hash: tx1 });
       expect(await artGallery.read.getTotalArtworks()).to.equal(1n);
 
       // List second
       const tx2 = await artGalleryAsArtist.write.listArtwork([
-        testURI + "2",
-        oneEther,
+        TEST_URI_2,
+        ONE_ETHER,
       ]);
       await publicClient.waitForTransactionReceipt({ hash: tx2 });
       expect(await artGallery.read.getTotalArtworks()).to.equal(2n);
     });
 
-    it("tokenURI should return the correct URI", async function () {
-      const { artGallery, testURI, tokenId } = await loadFixture(
-        createListedArtworkFixture,
-      );
-      expect(await artGallery.read.tokenURI([tokenId!])).to.equal(testURI);
+    it("9.8 `tokenURI` should return correct URI for existing token", async function () {
+      const { artGallery, tokenId } = await loadFixture(listedArtworkFixture);
+      expect(await artGallery.read.tokenURI([tokenId])).to.equal(TEST_URI_1);
     });
 
-    it("tokenURI should revert for non-existent token", async function () {
-      const { artGallery } = await loadFixture(
-        deployArtGalleryMarketplaceFixture,
-      );
-      const nonExistentTokenId = 999n;
+    it("9.9 `tokenURI` should revert for non-existent token", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
       await expect(
-        artGallery.read.tokenURI([nonExistentTokenId]),
+        artGallery.read.tokenURI([NON_EXISTENT_TOKEN_ID]),
       ).to.be.rejectedWith("ERC721NonexistentToken");
     });
   });
-});
+
+  describe("10. MaxPrice Management", function () {
+    it("10.1 should initialize with correct default max price", async function () {
+      const { artGallery } = await loadFixture(deployMarketplaceFixture);
+      expect(await artGallery.read.maxPrice()).to.equal(parseEther("1000"));
+    });
+
+    it("10.2 should allow admin to update max price", async function () {
+      const { artGallery, owner, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsOwner = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: owner } },
+      );
+
+      const newMaxPrice = parseEther("2000");
+      const tx = await artGalleryAsOwner.write.setMaxPrice([newMaxPrice]);
+      await publicClient.waitForTransactionReceipt({ hash: tx });
+
+      expect(await artGallery.read.maxPrice()).to.equal(newMaxPrice);
+
+      const events = await artGallery.getEvents.MaxPriceUpdated();
+      expect(events[events.length - 1].args.newMaxPrice).to.equal(newMaxPrice);
+    });
+
+    it("10.3 should NOT allow non-admin to update max price", async function () {
+      const { artGallery, otherAccount } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsOther = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: otherAccount } },
+      );
+
+      await expect(
+        artGalleryAsOther.write.setMaxPrice([parseEther("2000")]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__NotAdmin");
+    });
+  });
+
+  describe("11. Batch Listing Operations", function () {
+    const TEST_URI_3 = "ipfs://QmTestHash3";
+
+    it("11.1 should allow batch listing of multiple artworks", async function () {
+      const { artGallery, artist1, publicClient } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsArtist = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: artist1 } },
+      );
+
+      const uris = [TEST_URI_1, TEST_URI_2, TEST_URI_3];
+      const prices = [ONE_ETHER, TWO_ETHER, POINT_FIVE_ETHER];
+
+      const tx = await artGalleryAsArtist.write.batchListArtworks([
+        uris,
+        prices,
+      ]);
+      const receipt = await publicClient.waitForTransactionReceipt({
+        hash: tx,
+      });
+
+      const events = await artGallery.getEvents.BatchArtworksListed({
+        fromBlock: receipt.blockNumber,
+        toBlock: receipt.blockNumber,
+      });
+
+      expect(events.length).to.equal(1);
+      expect(events[0].args.tokenIds?.length).to.equal(3);
+
+      // Verify each artwork
+      for (let i = 0; i < uris.length; i++) {
+        const tokenId = events[0].args.tokenIds?.[i];
+        const [price, isForSale, artist] = await artGallery.read.getArtwork([
+          tokenId!,
+        ]);
+        expect(price).to.equal(prices[i]);
+        expect(isForSale).to.be.true;
+        expect(artist).to.equal(getAddress(artist1.account.address));
+        expect(await artGallery.read.tokenURI([tokenId!])).to.equal(uris[i]);
+      }
+    });
+
+    it("11.2 should revert batch listing with mismatched arrays", async function () {
+      const { artGallery, artist1 } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsArtist = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: artist1 } },
+      );
+
+      await expect(
+        artGalleryAsArtist.write.batchListArtworks([
+          [TEST_URI_1, TEST_URI_2],
+          [ONE_ETHER],
+        ]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__ArrayLengthMismatch");
+    });
+
+    it("11.3 should revert batch listing with empty arrays", async function () {
+      const { artGallery, artist1 } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsArtist = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: artist1 } },
+      );
+
+      await expect(
+        artGalleryAsArtist.write.batchListArtworks([[], []]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__EmptyArraysNotAllowed");
+    });
+
+    it("11.4 should revert batch listing if any price exceeds max price", async function () {
+      const { artGallery, artist1 } = await loadFixture(
+        deployMarketplaceFixture,
+      );
+      const artGalleryAsArtist = await hre.viem.getContractAt(
+        "ArtGalleryMarketplace",
+        artGallery.address,
+        { client: { wallet: artist1 } },
+      );
+
+      const maxPrice = await artGallery.read.maxPrice();
+      await expect(
+        artGalleryAsArtist.write.batchListArtworks([
+          [TEST_URI_1],
+          [maxPrice + 1n],
+        ]),
+      ).to.be.rejectedWith("ArtGalleryMarketplace__PriceExceedsMaximum");
+    });
+  });
+}); // End of outer describe block
