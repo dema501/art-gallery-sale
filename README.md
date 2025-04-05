@@ -49,13 +49,52 @@ npm install
 
 # Compile contracts
 npx hardhat compile
+```
 
-# Start a local Hardhat development network node (for manual testing/interaction)
+### Deployment
+
+1. Start a local Hardhat node:
+```bash
 npx hardhat node
+```
 
-# Deploy the ArtGalleryMarketplace contract using Hardhat Ignition
-# (Make sure your ignition/modules/ArtGalleryMarketplace.ts is configured)
-npx hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts
+2. Deploy the contract using Hardhat Ignition:
+```bash
+# Deploy to localhost
+npx hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network localhost
+
+# Deploy to a testnet (e.g., Sepolia)
+npx hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network sepolia
+```
+
+3. Verify contract deployment:
+```bash
+# Set the deployed contract address as an environment variable
+export CONTRACT_ADDRESS=<deployed-contract-address>
+
+# Check admin status
+npx hardhat run scripts/check-admin.ts --network localhost
+
+# For testnets, verify the contract on Etherscan
+npx hardhat verify --network sepolia $CONTRACT_ADDRESS
+```
+
+### Contract Interaction
+
+1. Check admin status:
+```bash
+CONTRACT_ADDRESS=<contract-address> npx hardhat run scripts/check-admin.ts --network localhost
+```
+
+2. Mint artwork:
+```bash
+CONTRACT_ADDRESS=<contract-address> ARTIST_ADDRESS=<artist-address> URI=<metadata-uri> npx hardhat run scripts/mint-artwork.ts --network localhost
+```
+
+3. List artwork for sale:
+```bash
+CONTRACT_ADDRESS=<contract-address> TOKEN_ID=<token-id> PRICE=<price-in-wei> npx hardhat run scripts/list-artwork.ts --network localhost
+```
 
 ## Testing
 
@@ -73,6 +112,21 @@ npm test
 
 # Run tests again, this time generating a gas usage report
 REPORT_GAS=true npx hardhat test
+```
+
+## Environment Variables
+
+Create a `.env` file in the root directory with the following variables:
+```env
+# Required for deployment
+PRIVATE_KEY=your_private_key
+INFURA_API_KEY=your_infura_api_key
+
+# Required for Etherscan verification
+ETHERSCAN_API_KEY=your_etherscan_api_key
+
+# Optional: For gas reporting
+COINMARKETCAP_API_KEY=your_coinmarketcap_api_key
 ```
 
 ## Security Considerations

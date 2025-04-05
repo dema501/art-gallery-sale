@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.28;
 
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
-import "@openzeppelin/contracts/interfaces/IERC2981.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Strings.sol";
-import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/utils/Pausable.sol";
+import {ERC721URIStorage, ERC721, IERC165} from "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import {IERC2981} from "@openzeppelin/contracts/interfaces/IERC2981.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Strings} from "@openzeppelin/contracts/utils/Strings.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 
 /**
  * @title ArtGalleryMarketplace
@@ -23,6 +23,13 @@ contract ArtGalleryMarketplace is
 {
     using Strings for uint256;
 
+    // --- Structs ---
+    struct ArtworkListing {
+        uint256 price; // Price in wei
+        bool isForSale; // Whether artwork is currently for sale
+        address artist; // Original artist address for royalties
+    }
+
     // --- Constants ---
     uint256 public constant DEFAULT_ROYALTY_FEE = 0;
     uint256 public constant MAX_ROYALTY_FEE = 5000; // 50%
@@ -34,13 +41,6 @@ contract ArtGalleryMarketplace is
     uint256 private _tokenIdCounter;
     mapping(uint256 => ArtworkListing) private _artworks;
     mapping(address => bool) private _admins;
-
-    // --- Structs ---
-    struct ArtworkListing {
-        uint256 price; // Price in wei
-        bool isForSale; // Whether artwork is currently for sale
-        address artist; // Original artist address for royalties
-    }
 
     // --- Events ---
     event ArtworkListed(

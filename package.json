@@ -1,8 +1,19 @@
 {
-  "name": "hardhat-project",
+  "name": "artgallery-marketplace",
+  "license": "MIT",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy": "hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network localhost",
+    "lint": "solhint 'contracts/**/*.sol'",
+    "lint:fix": "solhint 'contracts/**/*.sol' --fix"
+  },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
     "@openzeppelin/contracts": "^5.2.0",
-    "hardhat": "^2.22.19"
+    "hardhat": "^2.22.19",
+    "solhint": "^4.1.1"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7"
   }
 }
