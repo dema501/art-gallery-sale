@@ -5,7 +5,7 @@ const ArtGalleryMarketplaceModule = buildModule(
   (m) => {
     const artGalleryMarketplace = m.contract("ArtGalleryMarketplace", []);
     return { artGalleryMarketplace };
-  },
+  }
 );
 
 export default ArtGalleryMarketplaceModule;

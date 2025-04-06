@@ -3,7 +3,10 @@
   "license": "MIT",
   "scripts": {
     "compile": "hardhat compile",
-    "deploy": "hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network localhost",
+    "deploy:local": "hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network localhost",
+    "deploy:sepolia": "hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network sepolia",
+    "deploy:mainnet": "hardhat ignition deploy ./ignition/modules/ArtGalleryMarketplace.ts --network mainnet",
+    "test": "REPORT_GAS=true npx hardhat test",
     "lint": "solhint 'contracts/**/*.sol'",
     "lint:fix": "solhint 'contracts/**/*.sol' --fix"
   },
@@ -11,9 +14,7 @@
     "@nomicfoundation/hardhat-toolbox-viem": "^3.0.0",
     "@openzeppelin/contracts": "^5.2.0",
     "hardhat": "^2.22.19",
-    "solhint": "^4.1.1"
-  },
-  "dependencies": {
+    "solhint": "^4.1.1",
     "dotenv": "^16.4.7"
   }
 }
